@@ -18,7 +18,7 @@ python -m avmp phase4          # Phase 4: signing, WORM, MFA, Azure NSG + RFC, H
 python -m avmp benchmark       # detection + false-positive rate (Phase 2 AC-10)
 python -m avmp ingest --kev KEV.json --epss EPSS.csv.gz --db avmp.db   # load real feeds
 python -m avmp authoring       # playbook authoring UI on http://127.0.0.1:8600
-python run_tests.py            # full suite (63 tests) — reliable runner
+python run_tests.py            # full suite (93 tests) — reliable runner
 python -m avmp serve           # read-only Console API on http://127.0.0.1:8443
 ```
 
@@ -78,11 +78,12 @@ documented deployment entrypoints that delegate into `avmp`).
 | `avmp/authn.py`                | SSO stub + real TOTP MFA enforcement             | §7 |
 | `avmp/itsm.py`                 | ServiceNow/Jira change-control (RFC gate)        | §7 |
 | `avmp/ha.py`                   | HA failover, zero audit loss, scanner reroute    | §7 |
+| `avmp/azure_client.py`         | Live Azure NSG client (credentials-only switch)  | §7 |
 
 **Docs:** [phase2](docs/phase2-deliverables.md) · [phase3](docs/phase3-deliverables.md) ·
 [phase4](docs/phase4-deliverables.md) · [compliance-pack](docs/compliance-pack.md) ·
-[demo-script](docs/demo-script.md) · [DELTA.md](DELTA.md) ·
-[deployment-airgap](docs/deployment-airgap.md).
+[demo-script](docs/demo-script.md) · [azure-live-switch](docs/azure-live-switch.md) ·
+[DELTA.md](DELTA.md) · [deployment-airgap](docs/deployment-airgap.md).
 
 ### Scaffold path → implementation
 

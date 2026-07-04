@@ -397,7 +397,22 @@ def cmd_phase4(args: argparse.Namespace) -> int:
         _hr("D. Azure NSG remediation under change control (D5, D6 / P4-AC-7, AC-8)")
         snow = MockServiceNow()
         engine = RemediationEngine(console.store, itsm=snow)
-        nsg_backend = AzureNsgBackend()
+        # Credentials-only switch: use a live Azure client if one is configured,
+        # otherwise the tested simulated NSG. Nothing else in the flow changes.
+        import os as _os
+        from .azure_client import NsgScope, build_from_env
+        live = build_from_env()
+        if live is not None:
+            scopes = {"web-dmz-01": NsgScope(
+                _os.environ["AZURE_SUBSCRIPTION_ID"],
+                _os.environ.get("AZURE_RESOURCE_GROUP", "rg-sentinelfix"),
+                _os.environ.get("AZURE_NSG_NAME", "nsg-web-dmz-01"))}
+            nsg_backend = AzureNsgBackend(client=live, scopes=scopes)
+            print("  LIVE Azure client detected -> issuing real NSG calls")
+        else:
+            nsg_backend = AzureNsgBackend()
+            print("  no Azure credentials -> simulated NSG (set AZURE_SUBSCRIPTION_ID "
+                  "+ install azure SDK to go live)")
         plan = engine.plan(finding, web, PortExposurePlugin("demo.exposed_rdp", "RDP", port))
         print(f"  dry-run:\n    {nsg_backend.preview(plan.action)}")
         engine.approve(plan, approver="bob.approver", scanner_principal="alice.operator")

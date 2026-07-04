@@ -3,7 +3,7 @@
 Phase 2 (Prioritization & Playbooks). Run everything from `sentinelfix/`:
 
 ```bash
-python run_tests.py                          # full suite (89 tests) — reliable runner
+python run_tests.py                          # full suite (93 tests) — reliable runner
 python -m unittest discover -s tests         # (also works; avoid the `-t .` form on Windows)
 python -m avmp phase2                        # Phase 2 prioritization & playbooks
 python -m avmp phase3                        # Phase 3 safe auto-remediation (real backend)
@@ -51,7 +51,7 @@ See [docs/phase3-deliverables.md](docs/phase3-deliverables.md).
 | P4-AC-5 | Privileged action requires identity + MFA | ✅ | `test_authn.*` |
 | P4-AC-6 | Verifiable SBOM + reproducible build digest | ✅ | `test_crypto_supplychain.*` |
 | P4-AC-7 | Auto-RFC; apply blocked until approved; RFC id in audit | ✅ | `test_itsm_remediation.*` |
-| P4-AC-8 | Azure NSG adapter apply/rollback, dry-run first | ✅ (sim) | `test_azure_backend.*` |
+| P4-AC-8 | Azure NSG adapter apply/rollback, dry-run first; **live-tenant routing tested via fake client** (credentials-only switch) | ✅ | `test_azure_backend.*` (incl. `TestAzureLiveClientRouting`); go-live: `docs/azure-live-switch.md` |
 | P4-AC-10 | Console failover, zero audit loss; scanner reroute | ✅ | `test_ha.*` |
 | P4-AC-2/3/9 | TLS/mTLS, at-rest encryption, CIS/STIG image | 🟡 SWAP | need certs/KMS/image (see phase4-deliverables) |
 
@@ -71,10 +71,11 @@ See [docs/phase3-deliverables.md](docs/phase3-deliverables.md).
 | D4 Manual workflow | `avmp/workflow.py`, `avmp/store.py` (tickets table) | `test_workflow` |
 | D5 Reporting/trend | `avmp/reporting.py`, `avmp/store.py` (risk_snapshots table) | `test_reporting` |
 
-## Known open items (carry into Phase 4)
+## Known open items (pilot / hardening engagement)
 
-- **Production remediation adapters** — SSH/WinRM/Azure NSG backends implementing
-  the `RemediationBackend` interface (current build uses a controllable host model).
-- **Real auth** — SAML/AD/Entra + MFA, CSRF, mTLS for the authoring UI and API.
+- **Live environment swap-ins** — Azure NSG adapter is built + tested and is a
+  credentials-only switch (`docs/azure-live-switch.md`); still to wire against real
+  services: **SSH/WinRM** adapter, **Entra/SAML** SSO, **ServiceNow** instance,
+  **FIPS** module, **TLS certs / at-rest KMS**, **CIS/STIG** image.
 - Reporting "Top risks" table uses the simple `Finding.risk_score`; the configurable
   engine (`avmp/scoring.py`) is authoritative elsewhere. Unify if a single number is required.

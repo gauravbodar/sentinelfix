@@ -164,14 +164,23 @@ class SimulatedNsg:
 class AzureNsgBackend(RemediationBackend):
     """Applies close_port as an NSG Deny rule. Reversible and validatable.
 
-    With `client=None` it mutates a `SimulatedNsg` (safe, testable). A production
-    build passes an authenticated Azure SDK client and the same methods issue
-    real NSG calls — the engine, gates, canary, and audit are unchanged.
+    Two modes, identical logic:
+      * `client=None`  -> mutates an in-process `SimulatedNsg` (default, tested,
+        air-gap safe).
+      * `client=<AzureNsgClient>` + `scopes[asset_id]` -> issues REAL NSG calls
+        against a live tenant. This is a credentials-only switch: nothing else in
+        the engine / gates / canary / audit changes.
+
+    `scopes` maps asset_id -> NsgScope(subscription, resource_group, nsg_name);
+    an asset without a mapped scope falls back to the simulated NSG even when a
+    client is present (fail-safe: never guess a live target).
     """
 
-    def __init__(self, nsgs: dict[str, SimulatedNsg] | None = None, client=None) -> None:
+    def __init__(self, nsgs: dict[str, SimulatedNsg] | None = None, client=None,
+                 scopes: dict | None = None) -> None:
         self.nsgs = nsgs if nsgs is not None else {}
-        self.client = client   # None => simulated; production => Azure SDK client
+        self.client = client   # None => simulated; AzureNsgClient => live
+        self.scopes = scopes or {}
         self._undo: dict[str, tuple] = {}
 
     def _nsg(self, asset_id: str) -> SimulatedNsg:
@@ -180,11 +189,21 @@ class AzureNsgBackend(RemediationBackend):
             nsg = self.nsgs.setdefault(asset_id, SimulatedNsg(f"nsg-{asset_id}"))
         return nsg
 
+    def _live_scope(self, asset_id: str):
+        """Return the NsgScope for live calls, or None to use the simulated path."""
+        if self.client is None:
+            return None
+        return self.scopes.get(asset_id)
+
     def preview(self, action: RemediationAction) -> str:
         if action.action_type != "close_port":
             return f"[DRY-RUN] AzureNsgBackend does not handle {action.action_type}"
         port = action.params["port"]
-        return (f"[DRY-RUN] az network nsg rule create --nsg-name nsg-{action.asset_id} "
+        scope = self._live_scope(action.asset_id)
+        target = (f"--resource-group {scope.resource_group} --nsg-name {scope.nsg_name}"
+                  if scope else f"--nsg-name nsg-{action.asset_id}")
+        mode = "LIVE" if scope else "DRY-RUN/sim"
+        return (f"[{mode}] az network nsg rule create {target} "
                 f"--name deny-{port} --priority 100 --access Deny --direction Inbound "
                 f"--destination-port-ranges {port} --source-address-prefixes 0.0.0.0/0")
 
@@ -194,22 +213,36 @@ class AzureNsgBackend(RemediationBackend):
                 "AzureNsgBackend only implements 'close_port' (NSG deny rule).")
         if action.action_id in self._undo:
             return
-        nsg = self._nsg(action.asset_id)
         port = int(action.params["port"])
         rule_name = f"deny-{port}"
-        existed = rule_name in nsg.rules
-        nsg.add_rule(NsgRule(name=rule_name, priority=100, port=port))
+        scope = self._live_scope(action.asset_id)
+        if scope is not None:
+            existed = self.client.deny_exists(scope, port)
+            self.client.create_deny_rule(scope, rule_name, port)
+        else:
+            nsg = self._nsg(action.asset_id)
+            existed = rule_name in nsg.rules
+            nsg.add_rule(NsgRule(name=rule_name, priority=100, port=port))
         self._undo[action.action_id] = (rule_name, existed, action.asset_id)
 
     def validate(self, action: RemediationAction) -> bool:
-        return self._nsg(action.asset_id).has_deny(int(action.params["port"]))
+        port = int(action.params["port"])
+        scope = self._live_scope(action.asset_id)
+        if scope is not None:
+            return self.client.deny_exists(scope, port)
+        return self._nsg(action.asset_id).has_deny(port)
 
     def rollback(self, action: RemediationAction) -> None:
         undo = self._undo.pop(action.action_id, None)
         if undo is None:
             return
         rule_name, existed, asset_id = undo
-        if not existed:
+        if existed:
+            return  # rule pre-existed our change; leave it in place
+        scope = self._live_scope(asset_id)
+        if scope is not None:
+            self.client.delete_rule(scope, rule_name)
+        else:
             self._nsg(asset_id).remove_rule(rule_name)
 
 
