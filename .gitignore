@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Node (Console UI, if added)
+node_modules/
+dist/
+build/
+
+# Local state / secrets — never commit
+*.db
+*.sqlite
+secrets/
+*.pem
+*.key
+
+# Demo/report output
+out/
+avmp_data/
+
+# VDB / plugin bundles (large, signed artifacts)
+*.vdbundle
+*.plugbundle
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

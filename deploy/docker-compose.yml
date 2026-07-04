@@ -1,0 +1,36 @@
+# SentinelFix — local multi-service topology (PLACEHOLDER, PRD §4).
+#
+# Scaffold only: images/build contexts are not defined yet and this file will
+# NOT start anything useful. It records the intended service graph so the
+# deployment story is visible from Phase 0.
+version: "3.9"
+
+services:
+  console:
+    # build: ../services/console
+    image: sentinelfix/console:scaffold
+    # ports: ["8443:8443"]   # hardened web API (TLS) — Phase 0
+    # depends_on: [state-store]
+    profiles: ["scaffold"]
+
+  scanner-node:
+    # build: ../services/scanner-node
+    image: sentinelfix/scanner-node:scaffold
+    # environment: [ "CONSOLE_URL=https://console:8443" ]
+    profiles: ["scaffold"]
+
+  remediation-engine:
+    # build: ../services/remediation-engine
+    image: sentinelfix/remediation-engine:scaffold
+    profiles: ["scaffold"]
+
+  vdb-updater:
+    # build: ../services/vdb-updater
+    image: sentinelfix/vdb-updater:scaffold
+    profiles: ["scaffold"]
+
+  state-store:
+    # Encrypted PostgreSQL for assets/findings/policies (PRD §4 State Store).
+    # WORM audit store is a separate, append-only volume in implementation.
+    image: postgres:16
+    profiles: ["scaffold"]
