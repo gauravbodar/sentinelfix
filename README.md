@@ -11,8 +11,10 @@ appliance. See [`../sentinelfix-prd.md`](../sentinelfix-prd.md) for the full PRD
 
 ```bash
 # from this directory (sentinelfix/), Python 3.11+
-python -m avmp demo            # full pipeline end-to-end, writes reports to ./out
-python -m unittest discover -s tests -t .   # 22 tests
+python -m avmp demo            # MVP pipeline end-to-end, writes reports to ./out
+python -m avmp phase2          # Phase 2: ingest -> score -> playbook -> workflow -> report
+python -m avmp ingest --kev KEV.json --epss EPSS.csv.gz --db avmp.db   # load real feeds
+python -m unittest discover -s tests -t .   # 48 tests
 python -m avmp serve           # read-only Console API on http://127.0.0.1:8443
 ```
 
@@ -56,8 +58,15 @@ documented deployment entrypoints that delegate into `avmp`).
 | `avmp/canary.py`               | Staged rollout + rollback controller             | §6  |
 | `avmp/remediation.py`          | Governed apply: approval/window/canary/receipts  | §6  |
 | `avmp/vdb.py`                  | Signed bundle export/verify/offline import       | §5/§7 |
-| `avmp/reporting.py`            | Technical report, CSV, playbook, ledger          | §8  |
+| `avmp/reporting.py`            | Technical/exec report, CSV, playbook, ledger     | §8  |
 | `avmp/console.py`, `api.py`, `cli.py` | Orchestration facade, HTTP API, CLI       | §4  |
+| **Phase 2 →** `avmp/ingest.py` | KEV/EPSS feed ingestion → signed VDB bundle     | §5 D1 |
+| `avmp/scoring.py`              | Configurable, explainable, versioned risk scoring | §4 D2 |
+| `avmp/playbooks.py`            | Versioned playbook templates + linkage engine    | §6 D3 |
+| `avmp/workflow.py`             | Manual remediation state machine + SLA + audit   | §6 D4 |
+
+**Phase 2 docs:** [docs/phase2-deliverables.md](docs/phase2-deliverables.md) ·
+[DELTA.md](DELTA.md) · [docs/deployment-airgap.md](docs/deployment-airgap.md).
 
 ### Scaffold path → implementation
 
@@ -83,8 +92,10 @@ The original scaffold paths still resolve — they re-export from `avmp`:
 
 ## Roadmap (PRD §9)
 
-- **Phase 0/1** — foundation + core scanning/reporting.  ← *implemented here*
-- **Phase 2** — richer prioritization + playbook authoring UI.
+- **Phase 0/1** — foundation + core scanning/reporting.  ← *implemented*
+- **Phase 2** — KEV/EPSS ingestion, configurable scoring, playbook backend +
+  linkage, manual remediation workflow, exec reporting.  ← *implemented* (web
+  authoring UI D3.2 deferred pending UI-stack decision; see DELTA.md).
 - **Phase 3** — expanded safe auto-remediation backends.
 - **Phase 4** — government hardening (FIPS/TLS, real WORM store, ServiceNow).
 - **Phase 5** — agents + passive sensors.

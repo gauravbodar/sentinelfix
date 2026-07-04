@@ -93,6 +93,27 @@ class Store:
                 data       TEXT NOT NULL,
                 signature  TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS vdb (
+                cve_id       TEXT PRIMARY KEY,
+                data         TEXT NOT NULL,
+                source       TEXT,
+                last_updated TEXT
+            );
+            CREATE TABLE IF NOT EXISTS tickets (
+                finding_id TEXT PRIMARY KEY,
+                data       TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS playbooks (
+                playbook_id TEXT NOT NULL,
+                version     INTEGER NOT NULL,
+                data        TEXT NOT NULL,
+                PRIMARY KEY (playbook_id, version)
+            );
+            CREATE TABLE IF NOT EXISTS risk_snapshots (
+                seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+                taken_at  TEXT NOT NULL,
+                data      TEXT NOT NULL
+            );
             """
         )
         self._conn.commit()
@@ -178,6 +199,100 @@ class Store:
                 return False
             prev = stored_sig
         return True
+
+    # --- VDB (Phase 2 D1) ----------------------------------------------
+    def upsert_vdb_entry(self, cve_id: str, data: dict, source: str, last_updated: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO vdb(cve_id, data, source, last_updated) VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(cve_id) DO UPDATE SET data=excluded.data, "
+                "source=excluded.source, last_updated=excluded.last_updated",
+                (cve_id, json.dumps(data), source, last_updated),
+            )
+            self._conn.commit()
+
+    def get_vdb_entry(self, cve_id: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data, source, last_updated FROM vdb WHERE cve_id=?", (cve_id,)
+            ).fetchone()
+        if not row:
+            return None
+        d = json.loads(row["data"])
+        d["source"] = row["source"]
+        d["last_updated"] = row["last_updated"]
+        return d
+
+    def vdb_count(self) -> int:
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) AS n FROM vdb").fetchone()["n"]
+
+    def vdb_latest_update(self) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(last_updated) AS m FROM vdb"
+            ).fetchone()
+        return row["m"] if row else None
+
+    # --- Tickets (Phase 2 D4) ------------------------------------------
+    def upsert_ticket(self, finding_id: str, data: dict) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO tickets(finding_id, data) VALUES(?, ?) "
+                "ON CONFLICT(finding_id) DO UPDATE SET data=excluded.data",
+                (finding_id, json.dumps(data)),
+            )
+            self._conn.commit()
+
+    def get_ticket(self, finding_id: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data FROM tickets WHERE finding_id=?", (finding_id,)
+            ).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def list_tickets(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT data FROM tickets").fetchall()
+        return [json.loads(r["data"]) for r in rows]
+
+    # --- Playbooks (Phase 2 D3) ----------------------------------------
+    def upsert_playbook(self, playbook_id: str, version: int, data: dict) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO playbooks(playbook_id, version, data) VALUES(?, ?, ?) "
+                "ON CONFLICT(playbook_id, version) DO UPDATE SET data=excluded.data",
+                (playbook_id, version, json.dumps(data)),
+            )
+            self._conn.commit()
+
+    def list_playbooks(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM playbooks ORDER BY playbook_id, version"
+            ).fetchall()
+        return [json.loads(r["data"]) for r in rows]
+
+    # --- Risk snapshots for trends (Phase 2 D5) ------------------------
+    def append_risk_snapshot(self, taken_at: str, data: dict) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO risk_snapshots(taken_at, data) VALUES(?, ?)",
+                (taken_at, json.dumps(data)),
+            )
+            self._conn.commit()
+
+    def list_risk_snapshots(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT taken_at, data FROM risk_snapshots ORDER BY seq"
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = json.loads(r["data"])
+            d["taken_at"] = r["taken_at"]
+            out.append(d)
+        return out
 
     def close(self) -> None:
         self._conn.close()

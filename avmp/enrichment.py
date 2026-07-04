@@ -19,6 +19,9 @@ class VdbEntry:
     epss: float
     in_kev: bool
     title: str = ""
+    percentile: float = 0.0     # EPSS percentile
+    source: str = "builtin"     # provenance (Phase 2 D1.3)
+    last_updated: str = ""      # ISO date of the ingested record
 
 
 # Small built-in VDB slice. Real deployments import the full signed bundle.
@@ -39,16 +42,35 @@ _SEVERITY_DEFAULT_EPSS = {
 
 
 class Enricher:
-    def __init__(self, vdb: dict[str, VdbEntry] | None = None) -> None:
+    def __init__(self, vdb: dict[str, VdbEntry] | None = None, store=None) -> None:
         self.vdb = dict(_BUILTIN_VDB)
         if vdb:
             self.vdb.update(vdb)
+        # When a Store is provided, ingested VDB entries (Phase 2 D1) take
+        # precedence over the built-in slice.
+        self.store = store
+
+    def _lookup(self, cve: str) -> VdbEntry | None:
+        if self.store is not None:
+            d = self.store.get_vdb_entry(cve)
+            if d is not None:
+                return VdbEntry(
+                    cve_id=d.get("cve_id", cve),
+                    cvss=d.get("cvss", 0.0),
+                    epss=d.get("epss", 0.0),
+                    in_kev=d.get("in_kev", False),
+                    title=d.get("title", ""),
+                    percentile=d.get("percentile", 0.0),
+                    source=d.get("source", "ingested"),
+                    last_updated=d.get("last_updated", ""),
+                )
+        return self.vdb.get(cve)
 
     def enrich(self, finding: Finding) -> Finding:
         """Populate cvss/epss/kev from the VDB, or fall back to severity."""
         best: VdbEntry | None = None
         for cve in finding.cve_ids:
-            entry = self.vdb.get(cve)
+            entry = self._lookup(cve)
             if entry and (best is None or entry.cvss > best.cvss):
                 best = entry
         if best is not None:

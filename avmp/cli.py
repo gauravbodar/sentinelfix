@@ -173,6 +173,104 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# phase2 — prioritization & playbooks pipeline                                #
+# --------------------------------------------------------------------------- #
+_DEMO_KEY = b"demo-worm-and-supply-chain-key!!"  # 32 bytes; HSM/FIPS in prod
+
+
+def cmd_phase2(args: argparse.Namespace) -> int:
+    from .ingest import build_entries, build_signed_bundle, ingest_offline
+    from .models import Asset, AssetCriticality
+    from .reporting import executive_summary, playbook
+    from .workflow import FindingState
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    srv, port, stop = _open_listener()
+    try:
+        console = Console()
+
+        _hr("D1. Ingest signed KEV/EPSS bundle into VDB (air-gapped)")
+        kev = {"CVE-2019-0708": {"in_kev": True, "title": "BlueKeep RDP RCE"}}
+        epss = {"CVE-2019-0708": {"epss": 0.94, "percentile": 0.995}}
+        cvss = {"CVE-2019-0708": 9.8}
+        entries = build_entries(kev, epss, cvss, last_updated="2024-01-01")
+        bundle = out / "kev_epss.vdbundle"
+        build_signed_bundle(str(bundle), entries, _DEMO_KEY, "kev-epss-2024", "2024-01-01T00:00:00Z")
+        n = ingest_offline(str(bundle), _DEMO_KEY, console.store)
+        print(f"  ingested {n} VDB entr(y/ies); count={console.store.vdb_count()} "
+              f"updated={console.store.vdb_latest_update()}")
+
+        _hr("D2. Scan + configurable, explainable risk score")
+        rdp = PortExposurePlugin("demo.exposed_rdp", "RDP", port=port,
+                                 severity="high", cve=["CVE-2019-0708"])
+        web = Asset("web-dmz-01", hostname="web-dmz-01", ip_addresses=["127.0.0.1"],
+                    owner="soc@agency.gov", criticality=AssetCriticality.MEDIUM,
+                    internet_facing=True)
+        console.register_asset(web)
+        findings = console.scan_asset(web, plugins=[rdp], open_tickets=True)
+        f = findings[0]
+        breakdown = console.score(f, web)
+        print(f"  finding: {f.title}  score={breakdown.score} (model {breakdown.model_version})")
+        for fac in breakdown.factors:
+            print(f"    factor {fac.name:12} raw={fac.raw:<7} contribution={fac.contribution}")
+
+        _hr("D3. Linked remediation playbook")
+        pb_id = console.linked_playbook(f)
+        print(f"  linked playbook: {pb_id}  (published library: "
+              f"{len(console.playbooks.published())} playbooks)")
+
+        _hr("D4. Manual remediation workflow (state machine + SLA + WORM audit)")
+        wf = console.workflow
+        t = wf.get(f.finding_id)
+        print(f"  opened ticket state={t.state.value} sla_due={t.sla_due}")
+        wf.transition(f.finding_id, FindingState.TRIAGED, "alice.operator")
+        wf.assign(f.finding_id, "eng.team", "team.lead")
+        wf.transition(f.finding_id, FindingState.IN_PROGRESS, "eng.team")
+        wf.transition(f.finding_id, FindingState.REMEDIATED, "eng.team")
+        # Verification requires a passing re-scan (simulated True here).
+        wf.transition(f.finding_id, FindingState.VERIFIED, "qa", verify_fn=lambda: True)
+        final = wf.transition(f.finding_id, FindingState.CLOSED, "qa")
+        print(f"  lifecycle -> {final.state.value}; transitions={len(final.history)}")
+
+        _hr("D5. Executive summary with trend + MTTR")
+        console.record_risk_snapshot()
+        console.record_risk_snapshot()
+        (out / "executive_summary.md").write_text(
+            executive_summary(console.list_findings(), console.list_assets(), console.store),
+            encoding="utf-8")
+        (out / f"playbook_{pb_id}.md").write_text(
+            playbook(f, web, "staged_patch", console.playbooks.match(f).rollback_steps
+                     if console.playbooks.match(f) else []), encoding="utf-8")
+        print(f"  wrote executive_summary.md to {out.resolve()}")
+        print(f"  WORM audit chain verified: {console.audit_ok()}  "
+              f"records={sum(1 for _ in console.store.iter_audit())}")
+
+        _hr("PHASE 2 DEMO COMPLETE")
+        print("  [OK] KEV/EPSS ingest   [OK] explainable scoring   [OK] playbook linkage")
+        print("  [OK] manual workflow   [OK] exec summary + trend + MTTR")
+        return 0
+    finally:
+        stop.set()
+        srv.close()
+
+
+# --------------------------------------------------------------------------- #
+# ingest — load real KEV/EPSS feed files                                      #
+# --------------------------------------------------------------------------- #
+def cmd_ingest(args: argparse.Namespace) -> int:
+    from .ingest import ingest_feeds
+    from .store import Store
+
+    store = Store(args.db)
+    key = bytes.fromhex(args.key) if args.key else _DEMO_KEY
+    n = ingest_feeds(args.kev, args.epss, store, key, cvss_path=args.cvss,
+                     bundle_out=args.bundle_out, last_updated=args.date)
+    print(f"Ingested {n} VDB entries into {args.db} (total {store.vdb_count()}).")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # serve                                                                       #
 # --------------------------------------------------------------------------- #
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -202,6 +300,20 @@ def main(argv: list[str] | None = None) -> int:
     d = sub.add_parser("demo", help="run the full pipeline end-to-end")
     d.add_argument("--out", default="out", help="output directory for reports")
     d.set_defaults(func=cmd_demo)
+
+    p2 = sub.add_parser("phase2", help="run the Phase 2 prioritization & playbooks pipeline")
+    p2.add_argument("--out", default="out", help="output directory for reports")
+    p2.set_defaults(func=cmd_phase2)
+
+    ing = sub.add_parser("ingest", help="ingest KEV/EPSS feed files into the VDB")
+    ing.add_argument("--kev", required=True, help="path to CISA KEV JSON")
+    ing.add_argument("--epss", required=True, help="path to FIRST.org EPSS CSV(.gz)")
+    ing.add_argument("--cvss", default=None, help="optional CVSS CSV (cve,cvss)")
+    ing.add_argument("--db", default="avmp.db", help="SQLite DB path")
+    ing.add_argument("--key", default=None, help="bundle signing key (hex); demo key if omitted")
+    ing.add_argument("--bundle-out", dest="bundle_out", default=None, help="signed bundle output path")
+    ing.add_argument("--date", default="", help="feed date (ISO) for provenance")
+    ing.set_defaults(func=cmd_ingest)
 
     s = sub.add_parser("serve", help="start the read-only Console API")
     s.add_argument("--host", default="127.0.0.1")

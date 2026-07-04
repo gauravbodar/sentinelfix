@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
-from typing import Iterable
+from typing import Iterable, Optional
 
 from .models import Asset, Finding
 from .store import Store
@@ -101,6 +101,81 @@ def playbook(finding: Finding, asset: Asset, decision_mode: str,
         "## Risk notes",
         "- Applied via canary ring with automated rollback on health failure.",
     ]) + "\n"
+
+
+def executive_summary(findings: list[Finding], assets: list[Asset], store: Store,
+                      top_n: int = 5) -> str:
+    """Executive summary: top risks, severity mix, trend line, MTTR (PRD §8, D5)."""
+    amap = {a.asset_id: a for a in assets}
+    ordered = _sorted_by_risk(findings, amap)
+
+    sev_counts: dict[str, int] = {}
+    for f in findings:
+        sev_counts[f.severity.value] = sev_counts.get(f.severity.value, 0) + 1
+
+    lines = ["# SentinelFix — Executive Summary", ""]
+    lines.append(f"Assets: {len(assets)} | Findings: {len(findings)} | "
+                 f"VDB entries: {store.vdb_count()} (updated {store.vdb_latest_update() or 'n/a'})")
+    lines.append("")
+    lines.append("## Severity mix")
+    for sev in ("critical", "high", "medium", "low", "informational"):
+        if sev in sev_counts:
+            lines.append(f"- {sev}: {sev_counts[sev]}")
+    lines.append("")
+    lines.append(f"## Top {top_n} risks")
+    for f in ordered[:top_n]:
+        asset = amap.get(f.asset_id)
+        crit = asset.criticality if asset else None
+        risk = f.risk_score(crit) if crit else f.risk_score()
+        aname = (asset.hostname or asset.asset_id) if asset else f.asset_id
+        lines.append(f"- **{risk}** — {f.title} on {aname} "
+                     f"({'KEV' if f.in_kev else 'no-KEV'})")
+    lines.append("")
+
+    # Trend line from persisted risk snapshots.
+    snaps = store.list_risk_snapshots()
+    lines.append("## Risk trend (recent scans)")
+    if snaps:
+        for s in snaps[-6:]:
+            lines.append(f"- {s.get('taken_at', '?')}: total_risk={s.get('total_risk', 0)} "
+                         f"findings={s.get('finding_count', 0)}")
+        if len(snaps) >= 2:
+            delta = snaps[-1].get("total_risk", 0) - snaps[-2].get("total_risk", 0)
+            lines.append(f"- change vs previous: {'+' if delta >= 0 else ''}{round(delta, 1)}")
+    else:
+        lines.append("- no historical snapshots yet")
+    lines.append("")
+
+    # MTTR from remediation workflow tickets.
+    lines.append("## Mean time to remediate (MTTR)")
+    mttr = _compute_mttr_hours(store)
+    lines.append(f"- {mttr:.1f} hours (over {_remediated_count(store)} remediated finding(s))"
+                 if mttr is not None else "- not enough remediated findings yet")
+    return "\n".join(lines) + "\n"
+
+
+def _compute_mttr_hours(store: Store) -> Optional[float]:
+    from datetime import datetime
+    durations = []
+    for t in store.list_tickets():
+        created = t.get("created_at")
+        remediated_at = None
+        for h in t.get("history", []):
+            if h.get("to") in ("remediated", "verified", "closed"):
+                remediated_at = h.get("at")
+                break
+        if created and remediated_at:
+            d = (datetime.fromisoformat(remediated_at) - datetime.fromisoformat(created))
+            durations.append(d.total_seconds() / 3600.0)
+    return sum(durations) / len(durations) if durations else None
+
+
+def _remediated_count(store: Store) -> int:
+    n = 0
+    for t in store.list_tickets():
+        if any(h.get("to") in ("remediated", "verified", "closed") for h in t.get("history", [])):
+            n += 1
+    return n
 
 
 def remediation_ledger(store: Store) -> str:
