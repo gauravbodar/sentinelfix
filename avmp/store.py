@@ -114,6 +114,10 @@ class Store:
                 taken_at  TEXT NOT NULL,
                 data      TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+                data      TEXT NOT NULL
+            );
             """
         )
         self._conn.commit()
@@ -293,6 +297,32 @@ class Store:
             d["taken_at"] = r["taken_at"]
             out.append(d)
         return out
+
+    # --- WORM checkpoints (Phase 4 D3) ---------------------------------
+    def append_checkpoint(self, checkpoint: dict) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO checkpoints(data) VALUES(?)",
+                               (json.dumps(checkpoint),))
+            self._conn.commit()
+
+    def list_checkpoints(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT data FROM checkpoints ORDER BY seq").fetchall()
+        return [json.loads(r["data"]) for r in rows]
+
+    def audit_count(self) -> int:
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) AS n FROM audit").fetchone()["n"]
+
+    def import_audit_row(self, payload: dict, signature: str) -> None:
+        """Insert an audit row verbatim (used by HA replication so the standby's
+        hash chain byte-matches the primary). Not a mutation of existing rows."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO audit(record_id, data, signature) VALUES(?, ?, ?)",
+                (payload["record_id"], json.dumps(payload), signature),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()

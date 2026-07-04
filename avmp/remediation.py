@@ -20,6 +20,7 @@ from typing import Callable, Optional
 
 from .backends import RemediationAction, RemediationBackend, action_from_finding
 from .canary import CanaryRing, RolloutResult, staged_rollout
+from .itsm import ITSMConnector, RFCState
 from .models import (
     Asset,
     AuditRecord,
@@ -56,6 +57,7 @@ class RemediationPlan:
     proposal: RemediationProposal
     approved_by: Optional[str] = None
     action: Optional[RemediationAction] = None   # safe auto-fix action (Phase 3)
+    rfc_id: Optional[str] = None                 # change request id (Phase 4)
 
     @property
     def requires_approval(self) -> bool:
@@ -87,10 +89,26 @@ class RemediationEngine:
         store: Store,
         change_windows: Optional[list[ChangeWindow]] = None,
         clock: Callable[[], datetime] = utcnow,
+        itsm: Optional[ITSMConnector] = None,
     ) -> None:
         self.store = store
         self.change_windows = change_windows or []
         self.clock = clock
+        self.itsm = itsm
+
+    # --- change control (Phase 4 D6) ------------------------------------
+    def open_change_request(self, plan: RemediationPlan, actor: str) -> str:
+        """Auto-create an RFC for the planned remediation and record it."""
+        if self.itsm is None:
+            raise RuntimeError("No ITSM connector configured.")
+        rfc = self.itsm.create_rfc(
+            short_description=f"Remediate {plan.finding.title} on {plan.asset.asset_id}",
+            asset_id=plan.asset.asset_id, action_id=plan.proposal.action_id,
+            created_by=actor)
+        plan.rfc_id = rfc.rfc_id
+        self._audit(actor, "change.rfc_created", plan.finding.finding_id,
+                    {"rfc_id": rfc.rfc_id, "state": rfc.state.value})
+        return rfc.rfc_id
 
     # --- planning -------------------------------------------------------
     def plan(self, finding: Finding, asset: Asset, plugin: Plugin) -> RemediationPlan:
@@ -162,6 +180,16 @@ class RemediationEngine:
             self._audit(actor, "remediation.emergency_override", plan.finding.finding_id,
                         {"action_id": action_id}, outcome)
 
+        # Gate 4: change control — auto-apply blocked until the RFC is approved.
+        if self.itsm is not None:
+            rfc = self.itsm.get(plan.rfc_id) if plan.rfc_id else None
+            if rfc is None or rfc.state is not RFCState.APPROVED:
+                state = rfc.state.value if rfc else "none"
+                outcome.denied_reason = f"Change request not approved (RFC state: {state})."
+                self._audit(actor, "remediation.denied", plan.finding.finding_id,
+                            {"reason": outcome.denied_reason, "rfc_id": plan.rfc_id or ""}, outcome)
+                return outcome
+
         # Canary staged rollout. With a backend, apply/validate/rollback are
         # REAL and reversible against the target; without one, they are simulated.
         use_backend = backend is not None and plan.action is not None
@@ -193,6 +221,10 @@ class RemediationEngine:
         outcome.applied = rollout.success
         outcome.validated = rollout.success and use_backend
 
+        # Sync change-control state on success.
+        if self.itsm is not None and plan.rfc_id and rollout.success:
+            self.itsm.set_state(plan.rfc_id, RFCState.IMPLEMENTED)
+
         event = "remediation.applied" if rollout.success else "remediation.rollback_completed"
         rec = self._audit(actor, event, plan.finding.finding_id, {
             "action_id": action_id,
@@ -200,6 +232,7 @@ class RemediationEngine:
             "approved_by": plan.approved_by or "",
             "action_type": plan.action.action_type if plan.action else "n/a",
             "post_fix_validated": str(outcome.validated),
+            "rfc_id": plan.rfc_id or "",
             "simulated": str(not use_backend).lower(),
         }, outcome)
         outcome.receipt_signature = rec.signature

@@ -51,6 +51,11 @@ class RemediationBackend(ABC):
         """Post-fix validation: return True iff the change is in effect."""
         ...
 
+    def preview(self, action: RemediationAction) -> str:
+        """Dry-run: describe the change without applying it. Override for a
+        backend-specific preview (P4-AC-8)."""
+        return f"[DRY-RUN] {action.action_type} on {action.asset_id} {action.params}"
+
 
 class HostModelBackend(RemediationBackend):
     def __init__(self, registry: TargetRegistry) -> None:
@@ -126,6 +131,86 @@ class HostModelBackend(RemediationBackend):
                 host.secrets.pop(name, None)
             else:
                 host.set_secret(name, prev)
+
+
+@dataclass
+class NsgRule:
+    name: str
+    priority: int
+    port: int
+    access: str = "Deny"       # Allow | Deny
+    direction: str = "Inbound"
+    source: str = "0.0.0.0/0"
+
+
+class SimulatedNsg:
+    """In-process Azure Network Security Group model."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.rules: dict[str, NsgRule] = {}
+
+    def add_rule(self, rule: NsgRule) -> None:
+        self.rules[rule.name] = rule
+
+    def remove_rule(self, name: str) -> None:
+        self.rules.pop(name, None)
+
+    def has_deny(self, port: int) -> bool:
+        return any(r.port == port and r.access == "Deny" and r.direction == "Inbound"
+                   for r in self.rules.values())
+
+
+class AzureNsgBackend(RemediationBackend):
+    """Applies close_port as an NSG Deny rule. Reversible and validatable.
+
+    With `client=None` it mutates a `SimulatedNsg` (safe, testable). A production
+    build passes an authenticated Azure SDK client and the same methods issue
+    real NSG calls — the engine, gates, canary, and audit are unchanged.
+    """
+
+    def __init__(self, nsgs: dict[str, SimulatedNsg] | None = None, client=None) -> None:
+        self.nsgs = nsgs if nsgs is not None else {}
+        self.client = client   # None => simulated; production => Azure SDK client
+        self._undo: dict[str, tuple] = {}
+
+    def _nsg(self, asset_id: str) -> SimulatedNsg:
+        nsg = self.nsgs.get(asset_id)
+        if nsg is None:
+            nsg = self.nsgs.setdefault(asset_id, SimulatedNsg(f"nsg-{asset_id}"))
+        return nsg
+
+    def preview(self, action: RemediationAction) -> str:
+        if action.action_type != "close_port":
+            return f"[DRY-RUN] AzureNsgBackend does not handle {action.action_type}"
+        port = action.params["port"]
+        return (f"[DRY-RUN] az network nsg rule create --nsg-name nsg-{action.asset_id} "
+                f"--name deny-{port} --priority 100 --access Deny --direction Inbound "
+                f"--destination-port-ranges {port} --source-address-prefixes 0.0.0.0/0")
+
+    def apply(self, action: RemediationAction) -> None:
+        if action.action_type != "close_port":
+            raise RemediationBackendError(
+                "AzureNsgBackend only implements 'close_port' (NSG deny rule).")
+        if action.action_id in self._undo:
+            return
+        nsg = self._nsg(action.asset_id)
+        port = int(action.params["port"])
+        rule_name = f"deny-{port}"
+        existed = rule_name in nsg.rules
+        nsg.add_rule(NsgRule(name=rule_name, priority=100, port=port))
+        self._undo[action.action_id] = (rule_name, existed, action.asset_id)
+
+    def validate(self, action: RemediationAction) -> bool:
+        return self._nsg(action.asset_id).has_deny(int(action.params["port"]))
+
+    def rollback(self, action: RemediationAction) -> None:
+        undo = self._undo.pop(action.action_id, None)
+        if undo is None:
+            return
+        rule_name, existed, asset_id = undo
+        if not existed:
+            self._nsg(asset_id).remove_rule(rule_name)
 
 
 def action_from_finding(finding, proposal) -> Optional[RemediationAction]:

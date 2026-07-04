@@ -3,10 +3,11 @@
 Phase 2 (Prioritization & Playbooks). Run everything from `sentinelfix/`:
 
 ```bash
-python run_tests.py                          # full suite (63 tests) — reliable runner
+python run_tests.py                          # full suite (89 tests) — reliable runner
 python -m unittest discover -s tests         # (also works; avoid the `-t .` form on Windows)
-python -m avmp phase2                        # Phase 2 pipeline end-to-end
+python -m avmp phase2                        # Phase 2 prioritization & playbooks
 python -m avmp phase3                        # Phase 3 safe auto-remediation (real backend)
+python -m avmp phase4                        # Phase 4 government hardening
 python -m avmp benchmark                      # AC-10 detection / false-positive rate
 python -m avmp authoring                      # playbook authoring UI :8600
 python -m avmp demo                          # MVP pipeline (regression)
@@ -40,6 +41,24 @@ Status legend: ✅ done · 🟡 partial/headless · ⛔ deferred.
 | P3-AC-6 | Policy/approval/window/SoD gates hold with a real backend | ✅ | `test_remediation.*` + backend tests |
 
 See [docs/phase3-deliverables.md](docs/phase3-deliverables.md).
+
+### Phase 4 — Government hardening
+
+| # | Criterion | Status | Proof |
+|---|-----------|:------:|-------|
+| P4-AC-1 | Asymmetric signing; public-key verify; tamper/wrong-key rejected | ✅ | `test_crypto_supplychain.*` |
+| P4-AC-4 | WORM signed checkpoints detect edit + truncation | ✅ | `test_worm.*` |
+| P4-AC-5 | Privileged action requires identity + MFA | ✅ | `test_authn.*` |
+| P4-AC-6 | Verifiable SBOM + reproducible build digest | ✅ | `test_crypto_supplychain.*` |
+| P4-AC-7 | Auto-RFC; apply blocked until approved; RFC id in audit | ✅ | `test_itsm_remediation.*` |
+| P4-AC-8 | Azure NSG adapter apply/rollback, dry-run first | ✅ (sim) | `test_azure_backend.*` |
+| P4-AC-10 | Console failover, zero audit loss; scanner reroute | ✅ | `test_ha.*` |
+| P4-AC-2/3/9 | TLS/mTLS, at-rest encryption, CIS/STIG image | 🟡 SWAP | need certs/KMS/image (see phase4-deliverables) |
+
+7 of 11 fully REAL in-repo; 4 need a target environment. See
+[docs/phase4-deliverables.md](docs/phase4-deliverables.md),
+[docs/compliance-pack.md](docs/compliance-pack.md), and
+[docs/demo-script.md](docs/demo-script.md).
 
 ## Deliverable → code map
 

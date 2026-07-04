@@ -14,6 +14,7 @@ appliance. See [`../sentinelfix-prd.md`](../sentinelfix-prd.md) for the full PRD
 python -m avmp demo            # MVP pipeline end-to-end, writes reports to ./out
 python -m avmp phase2          # Phase 2: ingest -> score -> playbook -> workflow -> report
 python -m avmp phase3          # Phase 3: safe auto-remediation with real reversible backend
+python -m avmp phase4          # Phase 4: signing, WORM, MFA, Azure NSG + RFC, HA
 python -m avmp benchmark       # detection + false-positive rate (Phase 2 AC-10)
 python -m avmp ingest --kev KEV.json --epss EPSS.csv.gz --db avmp.db   # load real feeds
 python -m avmp authoring       # playbook authoring UI on http://127.0.0.1:8600
@@ -68,12 +69,19 @@ documented deployment entrypoints that delegate into `avmp`).
 | `avmp/playbooks.py`            | Versioned playbook templates + linkage engine    | §6 D3 |
 | `avmp/workflow.py`             | Manual remediation state machine + SLA + audit   | §6 D4 |
 | `avmp/ui.py`                   | Server-rendered playbook authoring UI (stdlib)   | §6 D3.2 |
-| **Phase 3 →** `avmp/backends.py` | Remediation backends + 3 safe auto-fix actions | §6 |
+| **Phase 3 →** `avmp/backends.py` | Remediation backends + 3 safe auto-fix actions + Azure NSG | §6 |
 | `avmp/targets.py`              | Controllable host model (real, reversible state) | §6 |
 | `avmp/benchmark.py`            | Detection / false-positive benchmark (AC-10)     | §10 |
+| **Phase 4 →** `avmp/crypto.py` | Asymmetric RSA signing (FIPS module = prod swap) | §7 |
+| `avmp/supplychain.py`, `sbom.py` | Signed bundles + SBOM + reproducible builds    | §7 |
+| `avmp/worm.py`                 | Hardened WORM: signed checkpoints, truncation    | §7 |
+| `avmp/authn.py`                | SSO stub + real TOTP MFA enforcement             | §7 |
+| `avmp/itsm.py`                 | ServiceNow/Jira change-control (RFC gate)        | §7 |
+| `avmp/ha.py`                   | HA failover, zero audit loss, scanner reroute    | §7 |
 
-**Docs:** [phase2-deliverables](docs/phase2-deliverables.md) ·
-[phase3-deliverables](docs/phase3-deliverables.md) · [DELTA.md](DELTA.md) ·
+**Docs:** [phase2](docs/phase2-deliverables.md) · [phase3](docs/phase3-deliverables.md) ·
+[phase4](docs/phase4-deliverables.md) · [compliance-pack](docs/compliance-pack.md) ·
+[demo-script](docs/demo-script.md) · [DELTA.md](DELTA.md) ·
 [deployment-airgap](docs/deployment-airgap.md).
 
 ### Scaffold path → implementation
@@ -109,6 +117,10 @@ The original scaffold paths still resolve — they re-export from `avmp`:
   reporting, detection benchmark (AC-10).  ← *implemented*
 - **Phase 3** — safe auto-remediation with **real, reversible backends** (3 safe
   actions), post-fix validation, canary rollback against a controllable host
-  model.  ← *implemented* (production SSH/WinRM/Azure adapters are Phase 4).
+  model.  ← *implemented*
+- **Phase 4** — government hardening: **asymmetric signing + SBOM**, **WORM signed
+  checkpoints**, **SSO + TOTP MFA**, **Azure NSG remediation under ServiceNow RFC
+  control**, **HA failover**.  ← *implemented* (FIPS module, TLS certs, live
+  Azure/Entra/ServiceNow are the pilot's swap-ins; see docs/phase4-deliverables.md).
 - **Phase 4** — government hardening (FIPS/TLS, real WORM store, ServiceNow).
 - **Phase 5** — agents + passive sensors.

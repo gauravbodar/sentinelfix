@@ -330,6 +330,125 @@ def cmd_phase3(args: argparse.Namespace) -> int:
         srv.close()
 
 
+def cmd_phase4(args: argparse.Namespace) -> int:
+    from . import crypto, sbom, supplychain, worm
+    from .authn import AuthManager, IdentityProvider, MFARequired, totp_now
+    from .backends import AzureNsgBackend, RemediationAction
+    from .ha import HACluster, ScannerPool
+    from .itsm import MockServiceNow
+    from .models import Asset, AssetCriticality, AuditRecord, utcnow
+    from .rbac import Permission, Role
+    from .remediation import RemediationEngine
+    from .store import AuditSigner, Store
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    srv, port, stop = _open_listener()
+    try:
+        console = Console()
+
+        _hr("A. Supply-chain: asymmetric signing + SBOM (D2 / P4-AC-1, AC-6)")
+        priv = crypto.generate_keypair(2048)
+        pub = priv.public()
+        print("  RSA-2048 keypair — private key on build host, PUBLIC KEY on appliance")
+        bom = sbom.generate_sbom("avmp")
+        bundle = out / "signed_feed.bundle"
+        digest = supplychain.build_signed_bundle(
+            str(bundle), [{"cve": "CVE-2021-44228", "kev": True}], priv, bom,
+            "kev-2024-12", "2024-12-01T00:00:00Z")
+        body = supplychain.verify_signed_bundle(str(bundle), pub)
+        print(f"  bundle verified with public key only; SBOM components={body['sbom']['component_count']}")
+        repro = supplychain.reproducible_digest(body["payload"], body["sbom"],
+                                                body["bundle_id"], body["created_at"])
+        print(f"  reproducible build digest matches: {repro == digest}")
+        tampered = out / "signed_feed_tampered.bundle"
+        tampered.write_text(bundle.read_text().replace("CVE-2021-44228", "CVE-EVIL"))
+        try:
+            supplychain.verify_signed_bundle(str(tampered), pub)
+            print("  tamper NOT detected (bug!)")
+        except supplychain.BundleVerificationError as exc:
+            print(f"  tampered bundle rejected fail-closed: {exc}")
+
+        _hr("B. Hardened WORM audit: signed checkpoint (D3 / P4-AC-4)")
+        web = Asset("web-dmz-01", hostname="web-dmz-01", ip_addresses=["127.0.0.1"],
+                    criticality=AssetCriticality.MEDIUM, internet_facing=True)
+        console.register_asset(web)
+        finding = console.scan_asset(web, plugins=[PortExposurePlugin(
+            "demo.exposed_rdp", "RDP", port=port, severity="high", cve=["CVE-2019-0708"])])[0]
+        cp = worm.create_checkpoint(console.store, priv, utcnow().isoformat())
+        print(f"  signed checkpoint at count={cp['count']}; verifies={worm.verify_checkpoint(console.store, pub, cp)}")
+        console.store._conn.execute("DELETE FROM audit WHERE seq=(SELECT MAX(seq) FROM audit)")
+        console.store._conn.commit()
+        print(f"  simulated truncation detected: {not worm.verify_checkpoint(console.store, pub, cp)}")
+
+        _hr("C. SSO + MFA enforcement (D4 / P4-AC-5)")
+        idp = IdentityProvider()
+        approver = idp.add_user("bob.approver", [Role.APPROVER], mfa_required=True)
+        auth = AuthManager(idp)
+        session = auth.login("bob.approver")
+        try:
+            auth.authorize(session.token, Permission.EXECUTE_REMEDIATION)
+        except MFARequired as exc:
+            print(f"  privileged action blocked before MFA: {exc}")
+        auth.verify_mfa(session.token, totp_now(approver.mfa_secret))
+        auth.authorize(session.token, Permission.EXECUTE_REMEDIATION)
+        print("  TOTP MFA passed -> remediation authorized (UI no longer trusts a plain actor field)")
+
+        _hr("D. Azure NSG remediation under change control (D5, D6 / P4-AC-7, AC-8)")
+        snow = MockServiceNow()
+        engine = RemediationEngine(console.store, itsm=snow)
+        nsg_backend = AzureNsgBackend()
+        plan = engine.plan(finding, web, PortExposurePlugin("demo.exposed_rdp", "RDP", port))
+        print(f"  dry-run:\n    {nsg_backend.preview(plan.action)}")
+        engine.approve(plan, approver="bob.approver", scanner_principal="alice.operator")
+        rfc_id = engine.open_change_request(plan, actor="bob.approver")
+        print(f"  RFC auto-created: {rfc_id} (state={snow.get(rfc_id).state.value})")
+        denied = engine.apply(plan, actor="bob.approver", backend=nsg_backend)
+        print(f"  apply blocked until RFC approved: applied={denied.applied} — {denied.denied_reason}")
+        snow.approve(rfc_id, approver="cab.manager")
+        ok = engine.apply(plan, actor="bob.approver", backend=nsg_backend)
+        print(f"  RFC approved -> applied={ok.applied} validated={ok.validated} "
+              f"nsg_deny_in_effect={nsg_backend.validate(plan.action)}")
+        print(f"  RFC {rfc_id} now {snow.get(rfc_id).state.value}; receipt {(ok.receipt_signature or '')[:16]}...")
+        # Isolated rollback demonstration on a distinct action.
+        rb = RemediationAction("nsg-rollback-demo", "close_port", "web-dmz-01", {"port": "9999"})
+        nsg_backend.apply(rb)
+        applied_ok = nsg_backend.validate(rb)
+        nsg_backend.rollback(rb)
+        print(f"  rollback safety: applied={applied_ok} -> after rollback deny present={nsg_backend.validate(rb)}")
+
+        _hr("E. Air-gapped operation (D7 / P4-AC-9)")
+        print("  offline signed bundle import: verified above (no network fetch)")
+        print("  outbound telemetry: DISABLED by default (local-only)")
+        print(f"  VDB entries local: {console.store.vdb_count()} (updated {console.store.vdb_latest_update() or 'n/a'})")
+
+        _hr("F. High availability: failover with zero audit loss (D8 / P4-AC-10)")
+        ha_key = AuditSigner(b"ha-demo-32-byte-key-000000000000"[:32])
+        primary = Store(":memory:", signer=ha_key)
+        standby = Store(":memory:", signer=ha_key)
+        cluster = HACluster(primary, standby)
+        for i in range(5):
+            cluster.append_audit(AuditRecord(str(i), "soc", "scan.completed", "asset", utcnow()))
+        print(f"  primary={primary.audit_count()} standby={standby.audit_count()} audit_loss={cluster.audit_loss()}")
+        active = cluster.failover()
+        print(f"  primary DOWN -> promoted standby: records={active.audit_count()} "
+              f"chain_ok={cluster.standby_chain_ok()}")
+        pool = ScannerPool(["scanner-a", "scanner-b"])
+        first = pool.route()
+        pool.mark_down(first)
+        print(f"  scan routed to {first}; {first} DOWN -> rerouted to {pool.route()}")
+
+        _hr("PHASE 4 DEMO COMPLETE — government-hardening capabilities")
+        print("  [OK] asymmetric signing + SBOM    [OK] WORM signed checkpoints")
+        print("  [OK] SSO + TOTP MFA               [OK] Azure NSG remediation + RFC gate")
+        print("  [OK] air-gapped + no telemetry    [OK] HA failover, zero audit loss")
+        print(f"\n  Reports/bundles written to {out.resolve()}")
+        return 0
+    finally:
+        stop.set()
+        srv.close()
+
+
 def cmd_benchmark(args: argparse.Namespace) -> int:
     from .benchmark import run_benchmark
     r = run_benchmark(n_vulnerable=args.vulnerable, n_clean=args.clean)
@@ -415,6 +534,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p3 = sub.add_parser("phase3", help="run the Phase 3 safe auto-remediation pipeline")
     p3.set_defaults(func=cmd_phase3)
+
+    p4 = sub.add_parser("phase4", help="run the Phase 4 government-hardening pipeline")
+    p4.add_argument("--out", default="out", help="output directory for bundles/reports")
+    p4.set_defaults(func=cmd_phase4)
 
     bm = sub.add_parser("benchmark", help="measure detection & false-positive rate (AC-10)")
     bm.add_argument("--vulnerable", type=int, default=10)
