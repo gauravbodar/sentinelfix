@@ -97,6 +97,11 @@ class PlaybookRepository:
         t = self._get(playbook_id, version)
         if t.state not in (PlaybookState.DRAFT, PlaybookState.IN_REVIEW):
             raise ValueError(f"Cannot publish from state {t.state.value}.")
+        # Separation of duties: the author/last editor cannot publish their own
+        # playbook (governance parity with the remediation approval flow).
+        if t.updated_by == actor:
+            raise PermissionError(
+                "Separation of duties: the author cannot publish their own playbook.")
         # Only one published version per playbook id — archive the rest.
         for other in self._all():
             if other.playbook_id == playbook_id and other.version != version \
@@ -112,6 +117,29 @@ class PlaybookRepository:
             if t.playbook_id == playbook_id and t.version == version:
                 return t
         raise KeyError(f"Playbook {playbook_id} v{version} not found.")
+
+    def get(self, playbook_id: str, version: int) -> PlaybookTemplate:
+        return self._get(playbook_id, version)
+
+    def versions(self, playbook_id: str) -> list[int]:
+        return sorted(t.version for t in self._all() if t.playbook_id == playbook_id)
+
+    def next_version(self, playbook_id: str) -> int:
+        vs = self.versions(playbook_id)
+        return (max(vs) + 1) if vs else 1
+
+    def new_version(self, playbook_id: str, actor: str) -> PlaybookTemplate:
+        """Clone the latest version into a fresh DRAFT for re-authoring."""
+        latest = max((t for t in self._all() if t.playbook_id == playbook_id),
+                     key=lambda t: t.version, default=None)
+        if latest is None:
+            raise KeyError(f"Playbook {playbook_id} not found.")
+        clone = PlaybookTemplate.from_dict(latest.to_dict())
+        clone.version = self.next_version(playbook_id)
+        clone.state = PlaybookState.DRAFT
+        clone.updated_by = actor
+        clone.updated_at = ""
+        return self.save(clone)
 
     # --- linkage engine (D3.3) -----------------------------------------
     def match(self, finding: Finding) -> Optional[PlaybookTemplate]:

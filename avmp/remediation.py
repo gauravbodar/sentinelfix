@@ -5,8 +5,10 @@ Governed path for a single finding:
     plan -> (approval if required) -> change-window check -> canary staged apply
     -> post-fix validation -> rollback on failure -> signed audit receipt
 
-Every gate fails closed. Applying a fix is SIMULATED in this MVP: no real host
-is modified. The point is to prove the control flow and the audit trail.
+Every gate fails closed. When a `RemediationBackend` is supplied (Phase 3), the
+apply / post-fix validation / rollback steps are REAL and reversible against the
+target (a controllable host model in the MVP; SSH/WinRM/Azure adapters in
+Phase 4). Without a backend the same control flow runs in simulation mode.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, time as dtime
 from typing import Callable, Optional
 
+from .backends import RemediationAction, RemediationBackend, action_from_finding
 from .canary import CanaryRing, RolloutResult, staged_rollout
 from .models import (
     Asset,
@@ -52,6 +55,7 @@ class RemediationPlan:
     decision: MatrixDecision
     proposal: RemediationProposal
     approved_by: Optional[str] = None
+    action: Optional[RemediationAction] = None   # safe auto-fix action (Phase 3)
 
     @property
     def requires_approval(self) -> bool:
@@ -72,6 +76,8 @@ class RemediationOutcome:
     denied_reason: Optional[str] = None
     rollout: Optional[RolloutResult] = None
     receipt_signature: Optional[str] = None
+    validated: bool = False          # post-fix validation passed (Phase 3)
+    simulated: bool = True           # True when no real backend was used
     audit_records: list[str] = field(default_factory=list)
 
 
@@ -101,7 +107,8 @@ class RemediationEngine:
                 dry_run_output="[MANUAL] Follow the generated playbook.",
                 rollback_steps=[],
             )
-        return RemediationPlan(finding, asset, decision, proposal)
+        action = action_from_finding(finding, proposal)
+        return RemediationPlan(finding, asset, decision, proposal, action=action)
 
     # --- gates ----------------------------------------------------------
     def approve(self, plan: RemediationPlan, approver: str, scanner_principal: str) -> None:
@@ -123,9 +130,11 @@ class RemediationEngine:
         actor: str,
         emergency_override: bool = False,
         health_fn: Optional[Callable[[CanaryRing], bool]] = None,
+        backend: Optional[RemediationBackend] = None,
     ) -> RemediationOutcome:
         action_id = plan.proposal.action_id
-        outcome = RemediationOutcome(action_id=action_id, applied=False)
+        outcome = RemediationOutcome(action_id=action_id, applied=False,
+                                     simulated=backend is None)
 
         # Gate 1: mode must permit automation.
         if not plan.auto_applicable:
@@ -153,32 +162,45 @@ class RemediationEngine:
             self._audit(actor, "remediation.emergency_override", plan.finding.finding_id,
                         {"action_id": action_id}, outcome)
 
-        # Canary staged rollout (SIMULATED apply/health/rollback).
+        # Canary staged rollout. With a backend, apply/validate/rollback are
+        # REAL and reversible against the target; without one, they are simulated.
+        use_backend = backend is not None and plan.action is not None
         rings = [
             CanaryRing("canary", [plan.asset.asset_id]),
             CanaryRing("fleet", [plan.asset.asset_id]),
         ]
-        applied_log: list[str] = []
-        health = health_fn or (lambda ring: True)  # default: healthy
 
         def apply_fn(ring: CanaryRing) -> None:
-            applied_log.append(ring.name)  # SIMULATION: no host mutation
+            if use_backend:
+                backend.apply(plan.action)   # idempotent across rings
+
+        def default_health(ring: CanaryRing) -> bool:
+            # Post-fix validation: confirm the change is actually in effect.
+            if use_backend:
+                return backend.validate(plan.action)
+            return True
+
+        health = health_fn or default_health
 
         def rollback_fn(ring: CanaryRing) -> None:
+            if use_backend:
+                backend.rollback(plan.action)
             self._audit(actor, "remediation.rolled_back", plan.finding.finding_id,
                         {"ring": ring.name, "action_id": action_id})
 
         rollout = staged_rollout(rings, apply_fn, health, rollback_fn)
         outcome.rollout = rollout
         outcome.applied = rollout.success
+        outcome.validated = rollout.success and use_backend
 
         event = "remediation.applied" if rollout.success else "remediation.rollback_completed"
         rec = self._audit(actor, event, plan.finding.finding_id, {
             "action_id": action_id,
             "mode": plan.decision.allowed_mode.value,
             "approved_by": plan.approved_by or "",
-            "dry_run_output": plan.proposal.dry_run_output,
-            "simulated": "true",
+            "action_type": plan.action.action_type if plan.action else "n/a",
+            "post_fix_validated": str(outcome.validated),
+            "simulated": str(not use_backend).lower(),
         }, outcome)
         outcome.receipt_signature = rec.signature
         return outcome

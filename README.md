@@ -13,8 +13,11 @@ appliance. See [`../sentinelfix-prd.md`](../sentinelfix-prd.md) for the full PRD
 # from this directory (sentinelfix/), Python 3.11+
 python -m avmp demo            # MVP pipeline end-to-end, writes reports to ./out
 python -m avmp phase2          # Phase 2: ingest -> score -> playbook -> workflow -> report
+python -m avmp phase3          # Phase 3: safe auto-remediation with real reversible backend
+python -m avmp benchmark       # detection + false-positive rate (Phase 2 AC-10)
 python -m avmp ingest --kev KEV.json --epss EPSS.csv.gz --db avmp.db   # load real feeds
-python -m unittest discover -s tests -t .   # 48 tests
+python -m avmp authoring       # playbook authoring UI on http://127.0.0.1:8600
+python run_tests.py            # full suite (63 tests) — reliable runner
 python -m avmp serve           # read-only Console API on http://127.0.0.1:8443
 ```
 
@@ -64,9 +67,14 @@ documented deployment entrypoints that delegate into `avmp`).
 | `avmp/scoring.py`              | Configurable, explainable, versioned risk scoring | §4 D2 |
 | `avmp/playbooks.py`            | Versioned playbook templates + linkage engine    | §6 D3 |
 | `avmp/workflow.py`             | Manual remediation state machine + SLA + audit   | §6 D4 |
+| `avmp/ui.py`                   | Server-rendered playbook authoring UI (stdlib)   | §6 D3.2 |
+| **Phase 3 →** `avmp/backends.py` | Remediation backends + 3 safe auto-fix actions | §6 |
+| `avmp/targets.py`              | Controllable host model (real, reversible state) | §6 |
+| `avmp/benchmark.py`            | Detection / false-positive benchmark (AC-10)     | §10 |
 
-**Phase 2 docs:** [docs/phase2-deliverables.md](docs/phase2-deliverables.md) ·
-[DELTA.md](DELTA.md) · [docs/deployment-airgap.md](docs/deployment-airgap.md).
+**Docs:** [phase2-deliverables](docs/phase2-deliverables.md) ·
+[phase3-deliverables](docs/phase3-deliverables.md) · [DELTA.md](DELTA.md) ·
+[deployment-airgap](docs/deployment-airgap.md).
 
 ### Scaffold path → implementation
 
@@ -84,18 +92,23 @@ The original scaffold paths still resolve — they re-export from `avmp`:
 
 - **Authorized use only.** `avmp/probes.py` opens real sockets. Point scans only
   at systems you are permitted to test.
-- **Remediation is simulated.** No production backend mutates hosts/firewalls in
-  this MVP; the value delivered is the governed control flow + audit trail.
-- **Not yet implemented (later phases):** credentialed SSH/WinRM checks, WASM
-  plugin sandbox, real patch backends, SAML/AD auth, FIPS crypto, HA clustering,
-  ServiceNow/Jira integration. Tracked in PRD §9.
+- **Remediation is real but targets a model.** Phase 3 apply/validate/rollback
+  actually mutate and restore a controllable `SimulatedHost` (`avmp/targets.py`) —
+  genuine reversible logic, but **no live infrastructure is touched**. A
+  production backend (SSH/WinRM/Azure NSG) drops into the `RemediationBackend`
+  interface behind the same policy/approval/canary/audit gates.
+- **Not yet implemented (Phase 4):** production host/cloud remediation adapters,
+  credentialed SSH/WinRM checks, WASM plugin sandbox, vendor patch orchestration,
+  SAML/AD auth + MFA, FIPS crypto, HA clustering, ServiceNow/Jira integration.
 
 ## Roadmap (PRD §9)
 
 - **Phase 0/1** — foundation + core scanning/reporting.  ← *implemented*
 - **Phase 2** — KEV/EPSS ingestion, configurable scoring, playbook backend +
-  linkage, manual remediation workflow, exec reporting.  ← *implemented* (web
-  authoring UI D3.2 deferred pending UI-stack decision; see DELTA.md).
-- **Phase 3** — expanded safe auto-remediation backends.
+  linkage, **server-rendered authoring UI**, manual remediation workflow, exec
+  reporting, detection benchmark (AC-10).  ← *implemented*
+- **Phase 3** — safe auto-remediation with **real, reversible backends** (3 safe
+  actions), post-fix validation, canary rollback against a controllable host
+  model.  ← *implemented* (production SSH/WinRM/Azure adapters are Phase 4).
 - **Phase 4** — government hardening (FIPS/TLS, real WORM store, ServiceNow).
 - **Phase 5** — agents + passive sensors.

@@ -28,8 +28,10 @@ Legend: `NEW` = net-new · `HARDEN` = extends the MVP slice · `UI` = needs a fr
 
 ### D3 — Playbook authoring + template engine `NEW` / `UI`
 - **D3.1** Versioned **playbook template model** covering all 10 PRD §6 fields.
-- **D3.2** **Authoring UI** with draft→review→publish states *(deferred pending UI
-  stack decision — backend model, versioning, and linkage delivered first)*.
+- **D3.2** **Authoring UI** with draft→review→publish states — delivered as a
+  **server-rendered, standard-library-only** web UI (`avmp/ui.py`); no JS
+  framework / Node / npm, keeping the air-gapped supply-chain footprint minimal
+  (PRD §7/§11). RBAC + author≠publisher separation of duties enforced.
 - **D3.3** Playbook ↔ finding **linkage engine** (bind by plugin id / CVE / severity).
 - **D3.4** Starter **library of ≥10 authored playbooks**.
 
@@ -72,7 +74,10 @@ Working build (`avmp ingest` / workflow commands), green test harness,
 Policy-gated **auto**-remediation *execution*, real canary/rollback of live changes,
 approval-gated auto-apply backends. Phase 2 remediation is **human-operated**.
 
-## Dependencies / open decisions
+## Dependencies / decisions
 - KEV/EPSS **bundle signing keys** must exist before D1 (reuses `vdb.py` HMAC; HSM/FIPS in prod).
-- **UI stack decision** gates D3.2 / D5 dashboards — backend delivered first so the
-  decision doesn't block the rest of Phase 2.
+- **UI stack — DECIDED: server-rendered, stdlib-only** (no JS framework/Node/npm).
+  Rationale: preserves the zero-external-dependency, air-gapped, reproducible-build
+  posture the product depends on; real auth (SAML/AD, CSRF, mTLS) arrives in Phase 4,
+  so the UI currently trusts `actor`/`role` fields and must sit behind an
+  authenticated proxy.

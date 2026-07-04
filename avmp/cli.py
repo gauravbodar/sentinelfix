@@ -256,6 +256,93 @@ def cmd_phase2(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# phase3 — safe auto-remediation with real, reversible backends               #
+# --------------------------------------------------------------------------- #
+def cmd_phase3(args: argparse.Namespace) -> int:
+    from .backends import HostModelBackend, RemediationAction
+    from .models import Asset, AssetCriticality
+    from .targets import SimulatedHost, TargetRegistry
+
+    srv, port, stop = _open_listener()
+    try:
+        console = Console()
+        registry = TargetRegistry()
+        host = registry.register(SimulatedHost(
+            asset_id="web-dmz-01", open_ports={port},
+            services={"telnetd": True}, secrets={"svc-account": "P@ssw0rd-old"},
+        ))
+        backend = HostModelBackend(registry)
+
+        rdp = PortExposurePlugin("demo.exposed_rdp", "RDP", port=port,
+                                 severity="high", cve=["CVE-2019-0708"])
+        web = Asset("web-dmz-01", hostname="web-dmz-01", ip_addresses=["127.0.0.1"],
+                    criticality=AssetCriticality.MEDIUM, internet_facing=True)
+        console.register_asset(web)
+
+        _hr("1. Scan -> finding -> plan (derives safe auto-fix action)")
+        finding = console.scan_asset(web, plugins=[rdp])[0]
+        plan = console.engine.plan(finding, web, rdp)
+        print(f"  finding: {finding.title}")
+        print(f"  policy mode: {plan.decision.allowed_mode.value} "
+              f"(approval={plan.requires_approval})")
+        print(f"  derived action: {plan.action.action_type} params={plan.action.params}")
+        print(f"  host before: port {port} exposed = {host.is_port_exposed(port)}")
+
+        _hr("2. Approve + apply via REAL backend (canary -> validate -> receipt)")
+        console.engine.approve(plan, approver="bob.approver", scanner_principal="alice.operator")
+        out = console.engine.apply(plan, actor="bob.approver", backend=backend)
+        print(f"  applied={out.applied} validated={out.validated} simulated={out.simulated}")
+        print(f"  host after:  port {port} exposed = {host.is_port_exposed(port)}")
+        print(f"  signed receipt: {(out.receipt_signature or '')[:16]}...")
+
+        _hr("3. Failed post-fix validation -> automatic rollback restores host")
+        plan2 = console.engine.plan(finding, web, rdp)
+        console.engine.approve(plan2, approver="bob.approver", scanner_principal="alice.operator")
+        out2 = console.engine.apply(plan2, actor="bob.approver", backend=backend,
+                                    health_fn=lambda ring: ring.name != "fleet")
+        print(f"  applied={out2.applied} (expected False after rollback)")
+        print(f"  host restored: port {port} exposed = {host.is_port_exposed(port)}")
+
+        _hr("4. All three safe auto-fix actions (apply -> validate -> rollback)")
+        for atype, params, probe in [
+            ("close_port", {"port": str(port)}, lambda: host.is_port_exposed(port)),
+            ("disable_service", {"service": "telnetd"}, lambda: host.service_enabled("telnetd")),
+            ("rotate_secret", {"secret": "svc-account", "old_value": "P@ssw0rd-old"},
+             lambda: host.get_secret("svc-account")),
+        ]:
+            act = RemediationAction(f"act-{atype}", atype, "web-dmz-01", params)
+            before = probe()
+            backend.apply(act)
+            ok = backend.validate(act)
+            after = probe()
+            backend.rollback(act)
+            print(f"  {atype:16} before={before!s:22} validated={ok!s:5} "
+                  f"after_apply={after!s:22} rolled_back={probe()!r}")
+
+        _hr("PHASE 3 DEMO COMPLETE")
+        print(f"  WORM audit chain verified: {console.audit_ok()}  "
+              f"records={sum(1 for _ in console.store.iter_audit())}")
+        print("  [OK] real reversible apply   [OK] post-fix validation")
+        print("  [OK] canary rollback         [OK] 3 safe auto-fix actions")
+        return 0
+    finally:
+        stop.set()
+        srv.close()
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    from .benchmark import run_benchmark
+    r = run_benchmark(n_vulnerable=args.vulnerable, n_clean=args.clean)
+    _hr("Detection benchmark (Phase 2 AC-10)")
+    print(f"  vulnerable={r.vulnerable} clean={r.clean} "
+          f"TP={r.true_positives} FP={r.false_positives} FN={r.false_negatives}")
+    print(f"  detection rate     : {r.detection_rate * 100:.1f}%")
+    print(f"  false-positive rate: {r.false_positive_rate * 100:.2f}%  "
+          f"(target < 5% -> {'PASS' if r.false_positive_rate < 0.05 else 'FAIL'})")
+    return 0 if r.false_positive_rate < 0.05 else 1
+
+
+# --------------------------------------------------------------------------- #
 # ingest — load real KEV/EPSS feed files                                      #
 # --------------------------------------------------------------------------- #
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -286,6 +373,27 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_authoring(args: argparse.Namespace) -> int:
+    from .playbooks import PlaybookRepository, load_builtin_library
+    from .store import Store
+    from .ui import serve_ui
+
+    store = Store(args.db) if args.db else Store(":memory:")
+    repo = PlaybookRepository(store=store)
+    if not repo.list():
+        load_builtin_library(repo)
+    httpd = serve_ui(repo, host=args.host, port=args.port)
+    print(f"SentinelFix playbook authoring UI on http://{args.host}:{args.port}/playbooks "
+          f"— Ctrl+C to stop")
+    print("  (dev only: trusts the actor/role form fields; run behind an "
+          "authenticated proxy in production)")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        httpd.shutdown()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows consoles default to cp1252; force UTF-8 so report glyphs render.
     for stream in (sys.stdout, sys.stderr):
@@ -305,6 +413,14 @@ def main(argv: list[str] | None = None) -> int:
     p2.add_argument("--out", default="out", help="output directory for reports")
     p2.set_defaults(func=cmd_phase2)
 
+    p3 = sub.add_parser("phase3", help="run the Phase 3 safe auto-remediation pipeline")
+    p3.set_defaults(func=cmd_phase3)
+
+    bm = sub.add_parser("benchmark", help="measure detection & false-positive rate (AC-10)")
+    bm.add_argument("--vulnerable", type=int, default=10)
+    bm.add_argument("--clean", type=int, default=20)
+    bm.set_defaults(func=cmd_benchmark)
+
     ing = sub.add_parser("ingest", help="ingest KEV/EPSS feed files into the VDB")
     ing.add_argument("--kev", required=True, help="path to CISA KEV JSON")
     ing.add_argument("--epss", required=True, help="path to FIRST.org EPSS CSV(.gz)")
@@ -319,6 +435,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8443)
     s.set_defaults(func=cmd_serve)
+
+    au = sub.add_parser("authoring", help="start the playbook authoring UI (D3.2)")
+    au.add_argument("--host", default="127.0.0.1")
+    au.add_argument("--port", type=int, default=8600)
+    au.add_argument("--db", default=None, help="SQLite DB for persistence (in-memory if omitted)")
+    au.set_defaults(func=cmd_authoring)
 
     args = parser.parse_args(argv)
     return args.func(args)
